@@ -183,8 +183,7 @@ where
 /// Returns whether the path we received corresponds to a temp file created
 /// by an editor or the OS
 pub fn is_temp_file(path: &Path) -> bool {
-    if let Some(filename) = path.file_name() {
-        let name = filename.to_str().unwrap();
+    if let Some(name) = path.file_name().and_then(|filename| filename.to_str()) {
         if matches!(name, ".DS_STORE" | ".DS_Store")
             // emacs
             || name.starts_with('#')
@@ -289,6 +288,18 @@ mod tests {
         ] {
             assert!(is_temp_file(PathBuf::from(name).as_path()), "{name}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_filenames_do_not_panic() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = PathBuf::from(OsStr::from_bytes(b"\xff.swp"));
+        assert!(is_temp_file(&temp));
+        let asset = PathBuf::from(OsStr::from_bytes(b"\xff"));
+        assert!(!is_temp_file(&asset));
     }
 
     #[test]
