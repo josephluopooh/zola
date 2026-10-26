@@ -183,6 +183,19 @@ where
 /// Returns whether the path we received corresponds to a temp file created
 /// by an editor or the OS
 pub fn is_temp_file(path: &Path) -> bool {
+    if let Some(filename) = path.file_name() {
+        let name = filename.to_str().unwrap();
+        if matches!(name, ".DS_STORE" | ".DS_Store")
+            // emacs
+            || name.starts_with('#')
+            || name.starts_with(".#")
+            // vim & jetbrains
+            || name.ends_with('~')
+        {
+            return true;
+        }
+    }
+
     let ext = path.extension();
     match ext {
         Some(ex) => match ex.to_str().unwrap() {
@@ -193,21 +206,11 @@ pub fn is_temp_file(path: &Path) -> bool {
             x if x.ends_with("jb_old___") => true,
             x if x.ends_with("jb_tmp___") => true,
             x if x.ends_with("jb_bak___") => true,
-            // vim & jetbrains
-            x if x.ends_with('~') => true,
             // helix
             x if x.ends_with("bck") => true,
-            _ => {
-                if let Some(filename) = path.file_stem() {
-                    // emacs
-                    let name = filename.to_str().unwrap();
-                    name.starts_with('#') || name.starts_with(".#")
-                } else {
-                    false
-                }
-            }
+            _ => false,
         },
-        None => true,
+        None => false,
     }
 }
 
@@ -255,7 +258,38 @@ mod tests {
     use filetime;
     use tempfile::tempdir_in;
 
-    use super::copy_file;
+    use super::{copy_file, is_temp_file};
+
+    #[test]
+    fn extensionless_assets_are_not_temp_files() {
+        for name in ["extensionless", "Makefile", ".gitignore", "diagram.svg", "dir.tmp/Makefile"] {
+            assert!(!is_temp_file(PathBuf::from(name).as_path()), "{name}");
+        }
+    }
+
+    #[test]
+    fn editor_and_os_temp_files_are_ignored() {
+        for name in [
+            "README~",
+            "#README#",
+            ".#README",
+            ".DS_Store",
+            ".DS_STORE",
+            "index.md~",
+            "#index.md#",
+            ".#index.md",
+            "index.swp",
+            "index.swx",
+            "index.tmp",
+            "index.kate-swp",
+            "index.txtjb_old___",
+            "index.txtjb_tmp___",
+            "index.txtjb_bak___",
+            "index.bck",
+        ] {
+            assert!(is_temp_file(PathBuf::from(name).as_path()), "{name}");
+        }
+    }
 
     #[test]
     fn test_copy_file_timestamp_preserved() {

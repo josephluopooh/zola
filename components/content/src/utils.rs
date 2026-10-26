@@ -198,12 +198,13 @@ mod tests {
         fs::File::create(path.join("subdir").join("GGG.txt")).unwrap();
 
         let assets = find_related_assets(path, &Config::default(), true);
-        assert_eq!(assets.len(), 7);
-        assert_eq!(assets.iter().filter(|p| p.extension().unwrap_or_default() != "md").count(), 7);
+        assert_eq!(assets.len(), 8);
+        assert_eq!(assets.iter().filter(|p| p.extension().unwrap_or_default() != "md").count(), 8);
 
         // Use case-insensitive ordering for testassets
         let testassets = [
             "example.js",
+            "extensionless",
             "fail.png",
             "FFF.txt",
             "graph.jpg",
@@ -238,11 +239,12 @@ mod tests {
         fs::File::create(path.join("subdir").join("GGG.txt")).unwrap();
 
         let assets = find_related_assets(path, &Config::default(), false);
-        assert_eq!(assets.len(), 5);
-        assert_eq!(assets.iter().filter(|p| p.extension().unwrap_or_default() != "md").count(), 5);
+        assert_eq!(assets.len(), 6);
+        assert_eq!(assets.iter().filter(|p| p.extension().unwrap_or_default() != "md").count(), 6);
 
         // Use case-insensitive ordering for testassets
-        let testassets = ["example.js", "fail.png", "FFF.txt", "graph.jpg", "GRAPH.txt"];
+        let testassets =
+            ["example.js", "extensionless", "fail.png", "FFF.txt", "graph.jpg", "GRAPH.txt"];
         for (asset, testasset) in assets.iter().zip(testassets.iter()) {
             assert!(
                 asset.strip_prefix(path).unwrap() == Path::new(testasset),
