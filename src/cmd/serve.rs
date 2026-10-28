@@ -42,6 +42,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use fs_err as fs;
 use mime_guess::from_path as mimetype_from_path;
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
@@ -520,6 +521,21 @@ fn create_new_site(
     Ok((site, address, constructed_base_url))
 }
 
+fn remove_static_output(site: &Site, path: &Path) -> Result<()> {
+    let relative_path = path.strip_prefix(&site.static_path)?;
+    if relative_path.as_os_str().is_empty() {
+        return Ok(());
+    }
+
+    let output_path = site.output_path.join(relative_path);
+    if output_path.is_dir() {
+        fs::remove_dir_all(&output_path)?;
+    } else if output_path.exists() {
+        fs::remove_file(&output_path)?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn serve(
     root_dir: &Path,
@@ -878,8 +894,27 @@ pub fn serve(
                             }
                         }
                         ChangeKind::StaticFiles => {
-                            for (partial_path, full_path, _) in change_group.iter() {
-                                copy_static(&site, full_path, partial_path);
+                            if change_group
+                                .iter()
+                                .any(|(_, _, kind)| *kind == SimpleFileSystemEventKind::Remove)
+                            {
+                                for (_, full_path, kind) in change_group.iter() {
+                                    if *kind == SimpleFileSystemEventKind::Remove {
+                                        if let Err(error) = remove_static_output(&site, full_path) {
+                                            log::error!(
+                                                "Failed to remove old static output for {}: {error}",
+                                                full_path.display()
+                                            );
+                                        }
+                                    }
+                                }
+                                if let Some(s) = recreate_site() {
+                                    site = s;
+                                }
+                            } else {
+                                for (partial_path, full_path, _) in change_group.iter() {
+                                    copy_static(&site, full_path, partial_path);
+                                }
                             }
                         }
                         ChangeKind::Sass => {

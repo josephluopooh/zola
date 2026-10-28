@@ -87,58 +87,66 @@ pub fn filter_events(
     for event in events.iter() {
         log::debug!(target: "file_change", "file change event: {:?}", event);
 
-        let simple_kind = get_relevant_event_kind(&event.event.kind);
-        if simple_kind.is_none() {
-            continue;
-        }
+        let path_changes =
+            if matches!(event.event.kind, EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                && event.event.paths.len() == 2
+            {
+                vec![
+                    (event.event.paths[0].clone(), SimpleFileSystemEventKind::Remove),
+                    (event.event.paths[1].clone(), SimpleFileSystemEventKind::Create),
+                ]
+            } else {
+                let Some(simple_kind) = get_relevant_event_kind(&event.event.kind) else {
+                    continue;
+                };
+                if event.event.paths.len() != 1 {
+                    log::error!(
+                        "Skipping unsupported file system event with multiple paths: {:?}",
+                        event.event.kind
+                    );
+                    continue;
+                }
+                vec![(event.event.paths[0].clone(), simple_kind)]
+            };
 
-        // We currently only handle notify events that report a single path per event.
-        if event.event.paths.len() != 1 {
-            log::error!(
-                "Skipping unsupported file system event with multiple paths: {:?}",
-                event.event.kind
-            );
-            continue;
-        }
-        let path = event.event.paths[0].clone();
+        for (path, simple_kind) in path_changes {
+            // Since we debounce things, some files might already not exist anymore by the
+            // time we get to them. Of course, if this was a removal event, the path won't
+            // exist, but we do want to consider it meaningful.
+            if simple_kind != SimpleFileSystemEventKind::Remove {
+                if !path.exists() {
+                    log::debug!(target: "file_change", "skipping file change event because path does not exist");
+                    continue;
+                }
+            }
 
-        // Since we debounce things, some files might already not exist anymore by the
-        // time we get to them. Of course, if this was a removal event, the path won't
-        // exist, but we do want to consider it meaningful.
-        if let Some(SimpleFileSystemEventKind::Remove) = simple_kind {
-        } else {
-            if !path.exists() {
-                log::debug!(target: "file_change", "skipping file change event because path does not exist");
+            if is_ignored_file(ignored_content_globset, &path) {
+                log::debug!(target: "file_change", "skipping file change event because it is ignored by content globset {:?}", ignored_content_globset);
                 continue;
             }
-        }
 
-        if is_ignored_file(ignored_content_globset, &path) {
-            log::debug!(target: "file_change", "skipping file change event because it is ignored by content globset {:?}", ignored_content_globset);
-            continue;
-        }
+            if is_temp_file(&path) {
+                log::debug!(target: "file_change", "skipping file change event because it is a temp file");
+                continue;
+            }
 
-        if is_temp_file(&path) {
-            log::debug!(target: "file_change", "skipping file change event because it is a temp file");
-            continue;
-        }
+            // We only care about changes in non-empty folders
+            if path.is_dir() && is_folder_empty(&path) {
+                log::debug!(target: "file_change", "skipping file change event because it is an empty dir");
+                continue;
+            }
 
-        // We only care about changes in non-empty folders
-        if path.is_dir() && is_folder_empty(&path) {
-            log::debug!(target: "file_change", "skipping file change event because it is an empty dir");
-            continue;
-        }
+            // Ignore ordinary files peer to config.toml. This assumes all other files we care
+            // about are nested more deeply than config.toml or are directories peer to config.toml.
+            if path != config_path && path.is_file() && path.parent() == config_path.parent() {
+                log::debug!(target: "file_change", "skipping file change event because it is a peer to config.toml");
+                continue;
+            }
 
-        // Ignore ordinary files peer to config.toml. This assumes all other files we care
-        // about are nested more deeply than config.toml or are directories peer to config.toml.
-        if path != config_path && path.is_file() && path.parent() == config_path.parent() {
-            log::debug!(target: "file_change", "skipping file change event because it is a peer to config.toml");
-            continue;
+            let (change_k, partial_p) = detect_change_kind(root_dir, &path, config_path);
+            log::debug!(target: "file_change", "tracking meaningful file change event: path {:?}, partial_p {:?}, simple_kind {:?}, change_k {:?}", path, partial_p, simple_kind, change_k);
+            meaningful_events.insert(path, (partial_p, simple_kind, change_k));
         }
-
-        let (change_k, partial_p) = detect_change_kind(root_dir, &path, config_path);
-        log::debug!(target: "file_change", "tracking meaningful file change event: path {:?}, partial_p {:?}, simple_kind {:?}, change_k {:?}", path, partial_p, simple_kind.as_ref().unwrap(), change_k);
-        meaningful_events.insert(path, (partial_p, simple_kind.unwrap(), change_k));
     }
 
     // Bin changes by change kind to support later iteration over batches of changes.
@@ -192,13 +200,45 @@ fn detect_change_kind(pwd: &Path, path: &Path, config_path: &Path) -> (ChangeKin
 
 #[cfg(test)]
 mod tests {
+    use notify_debouncer_full::DebouncedEvent;
     use notify_debouncer_full::notify::event::*;
     use std::path::{Path, PathBuf};
+    use std::time::Instant;
 
     use super::{
-        ChangeKind, SimpleFileSystemEventKind, detect_change_kind, get_relevant_event_kind,
-        is_temp_file,
+        ChangeKind, SimpleFileSystemEventKind, detect_change_kind, filter_events,
+        get_relevant_event_kind, is_temp_file,
     };
+
+    #[test]
+    fn rename_both_tracks_old_and_new_static_paths() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_site");
+        let old = root.join("static/old-site.css");
+        let new = root.join("static/site.css");
+        assert!(new.exists());
+
+        let event = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(old.clone())
+            .add_path(new.clone());
+        let changes = filter_events(
+            vec![DebouncedEvent::new(event, Instant::now())],
+            &root,
+            &root.join("config.toml"),
+            &None,
+        );
+
+        let static_changes = &changes[&ChangeKind::StaticFiles];
+        assert!(static_changes.contains(&(
+            PathBuf::from("/static/old-site.css"),
+            old,
+            SimpleFileSystemEventKind::Remove,
+        )));
+        assert!(static_changes.contains(&(
+            PathBuf::from("/static/site.css"),
+            new,
+            SimpleFileSystemEventKind::Create,
+        )));
+    }
 
     // This test makes sure we at least have code coverage on the `notify` event kinds we care
     // about when watching the file system for site changes. This is to make sure changes to the
